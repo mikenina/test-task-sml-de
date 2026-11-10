@@ -1,42 +1,29 @@
-import argparse
 import logging
-import os
 import sys
-from datetime import date
 
 import psycopg2
 
 from etl.audit import Audit
-from etl.loader import load_prices, load_price_dates, load_price_body_types, load_reference
+from etl.config import ConfigError, get_as_of, parse_args, validate_interval
+from etl.db import connect
+from etl.loader_core import load_core_reference, load_core_price
+from etl.loader_raw import (
+    load_price_body_types,
+    load_price_dates,
+    load_prices,
+    load_reference,
+)
 from etl.stages import (
-    STAGE_RAW_PRICES,
-    STAGE_RAW_PRICE_DATES,
+    STAGE_CORE_PRICE,
+    STAGE_CORE_REFERENCE,
     STAGE_RAW_PRICE_BODY_TYPES,
+    STAGE_RAW_PRICE_DATES,
+    STAGE_RAW_PRICES,
     STAGE_RAW_REFERENCE,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("etl")
-
-
-def connect(autocommit=False):
-    conn = psycopg2.connect(
-        host=os.environ.get("POSTGRES_HOST", "postgres"),
-        port=int(os.environ.get("POSTGRES_PORT", "5432")),
-        dbname=os.environ["POSTGRES_DB"],
-        user=os.environ["POSTGRES_USER"],
-        password=os.environ["POSTGRES_PASSWORD"],
-    )
-    conn.autocommit = autocommit
-    return conn
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--interval-start", required=True, type=date.fromisoformat)
-    parser.add_argument("--interval-end", required=True, type=date.fromisoformat)
-    parser.add_argument("--triggered-by", default="manual")
-    return parser.parse_args()
 
 
 def run_stage(audit, name, fn):
@@ -52,53 +39,98 @@ def run_stage(audit, name, fn):
 
 def run():
     args = parse_args()
-    if args.interval_start >= args.interval_end:
-        raise SystemExit(
-            f"interval_start ({args.interval_start}) must be < "
-            f"interval_end ({args.interval_end})"
-        )
 
-    data_conn = connect()
+    try:
+        validate_interval(args.interval_start, args.interval_end)
+    except ConfigError as e:
+        log.error("config error: %s", e)
+        return 2
+
+    as_of = get_as_of()
+    data_conn = connect(autocommit=False)
     audit_conn = connect(autocommit=True)
     audit = Audit(audit_conn)
-    audit.start_run(args.interval_start, args.interval_end, args.triggered_by)
+
+    try:
+        audit.start_run(args.interval_start, args.interval_end, args.triggered_by)
+    except psycopg2.errors.ExclusionViolation:
+        log.error(
+            "another ETL run is running for an overlapping interval; aborting"
+        )
+        data_conn.close()
+        audit_conn.close()
+        return 1
+
+    run_id = audit.run_id
     log.info(
-        "run %s started: interval=[%s, %s)",
-        audit.run_id, args.interval_start, args.interval_end,
+        "run %s started: interval=[%s, %s) as_of=%s",
+        run_id, args.interval_start, args.interval_end, as_of,
     )
 
     try:
-        run_stage(
-            audit, STAGE_RAW_PRICES,
-            lambda: {"rows_out": load_prices(data_conn, args.interval_start, args.interval_end)},
-        )
-        run_stage(
-            audit, STAGE_RAW_PRICE_DATES,
-            lambda: {"rows_out": load_price_dates(data_conn, args.interval_start, args.interval_end)},
-        )
-        run_stage(
-            audit, STAGE_RAW_PRICE_BODY_TYPES,
-            lambda: {"rows_out": load_price_body_types(data_conn, args.interval_start, args.interval_end)},
-        )
-
-        data_conn.commit()
-
+        # ---- source -> raw ----
         run_stage(
             audit, STAGE_RAW_REFERENCE,
-            lambda: {"details": load_reference(data_conn)},
+            lambda: {"details": load_reference(data_conn, run_id)},
         )
-
         data_conn.commit()
+
+        run_stage(
+            audit, STAGE_RAW_PRICES,
+            lambda: {"rows_out": load_prices(
+                data_conn, run_id, args.interval_start, args.interval_end)},
+        )
+        data_conn.commit()
+
+        run_stage(
+            audit, STAGE_RAW_PRICE_DATES,
+            lambda: {"rows_out": load_price_dates(
+                data_conn, run_id, args.interval_start, args.interval_end)},
+        )
+        data_conn.commit()
+
+        run_stage(
+            audit, STAGE_RAW_PRICE_BODY_TYPES,
+            lambda: {"rows_out": load_price_body_types(
+                data_conn, run_id, args.interval_start, args.interval_end)},
+        )
+        data_conn.commit()
+
+        # ---- raw -> core ----
+        try:
+            with data_conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM core.price "
+                    "WHERE loading_date >= %s AND loading_date < %s",
+                    (args.interval_start, args.interval_end),
+                )
+
+            run_stage(
+                audit, STAGE_CORE_REFERENCE,
+                lambda: load_core_reference(data_conn, run_id),
+            )
+
+            run_stage(
+                audit, STAGE_CORE_PRICE,
+                lambda: load_core_price(
+                    data_conn, run_id,
+                    args.interval_start, args.interval_end, as_of),
+            )
+
+            data_conn.commit()
+        except Exception:
+            data_conn.rollback()
+            raise
+
     except Exception as e:
-        data_conn.rollback()
-        log.exception("run %s failed", audit.run_id)
+        log.exception("run %s failed", run_id)
         audit.finish_run("failed", error_message=str(e))
         data_conn.close()
         audit_conn.close()
         return 1
 
     audit.finish_run("success")
-    log.info("run %s finished: success", audit.run_id)
+    log.info("run %s finished: success", run_id)
     data_conn.close()
     audit_conn.close()
     return 0

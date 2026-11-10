@@ -1,6 +1,5 @@
 import json
 
-
 class Audit:
     def __init__(self, conn):
         self.conn = conn
@@ -15,7 +14,6 @@ class Audit:
                 (interval_start, interval_end, triggered_by),
             )
             self.run_id = cur.fetchone()[0]
-        self.conn.commit()
 
     def finish_run(self, status, error_message=None):
         with self.conn.cursor() as cur:
@@ -25,7 +23,6 @@ class Audit:
                 "WHERE id = %s",
                 (status, error_message, self.run_id),
             )
-        self.conn.commit()
 
     def start_stage(self, name):
         with self.conn.cursor() as cur:
@@ -34,9 +31,7 @@ class Audit:
                 "VALUES (%s, %s) RETURNING id",
                 (self.run_id, name),
             )
-            stage_id = cur.fetchone()[0]
-        self.conn.commit()
-        return stage_id
+            return cur.fetchone()[0]
 
     def finish_stage(self, stage_id, status, rows_in=None, rows_out=None,
                      rows_quarantined=None, details=None, error_message=None):
@@ -48,13 +43,8 @@ class Audit:
                 "details = %s, error_message = %s "
                 "WHERE id = %s",
                 (
-                    status,
-                    rows_in,
-                    rows_out,
-                    rows_quarantined,
+                    status, rows_in, rows_out, rows_quarantined,
                     json.dumps(details) if details else None,
-                    error_message,
-                    stage_id,
+                    error_message, stage_id,
                 ),
             )
-        self.conn.commit()
