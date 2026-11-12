@@ -79,10 +79,23 @@ CREATE TABLE IF NOT EXISTS core.city (
     longitude double precision
 );
 
+CREATE TABLE IF NOT EXISTS core.body_group (
+    id smallint PRIMARY KEY,
+    name text NOT NULL UNIQUE
+);
+
+INSERT INTO core.body_group (id, name) VALUES
+    (1, 'Тент'),
+    (2, 'Рефрижератор'),
+    (3, 'Изотерм'),
+    (4, 'Борт'),
+    (5, 'Прочие')
+ON CONFLICT (id) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS core.body_type (
-    body_type_id integer PRIMARY KEY,
-    std_id integer,
-    body_group text NOT NULL
+    id integer PRIMARY KEY,
+    name text NOT NULL,
+    body_group_id smallint NOT NULL REFERENCES core.body_group(id)
 );
 
 CREATE TABLE IF NOT EXISTS core.price (
@@ -93,7 +106,7 @@ CREATE TABLE IF NOT EXISTS core.price (
     distance double precision NOT NULL,
     total_weight double precision NOT NULL,
     total_volume double precision NOT NULL,
-    body_group text NOT NULL,
+    main_body_type_id integer REFERENCES core.body_type(id),
     weight_category varchar(4) NOT NULL,
     volume_category varchar(4) NOT NULL,
     price double precision NOT NULL,
@@ -110,8 +123,9 @@ CREATE INDEX IF NOT EXISTS idx_core_price_loading_date
 CREATE TABLE IF NOT EXISTS core.price_body_group (
     price_id bigint NOT NULL
         REFERENCES core.price(price_id) ON DELETE CASCADE,
-    body_group text NOT NULL,
-    PRIMARY KEY (price_id, body_group)
+    body_group_id smallint NOT NULL
+        REFERENCES core.body_group(id),
+    PRIMARY KEY (price_id, body_group_id)
 );
 
 CREATE TABLE IF NOT EXISTS core.price_dates (
@@ -124,15 +138,6 @@ CREATE TABLE IF NOT EXISTS core.price_dates (
 -- ============================================================
 -- DQ
 -- ============================================================
-CREATE TABLE IF NOT EXISTS dq.quarantine_prices (
-    price_id bigint NOT NULL,
-    reason_code varchar(30) NOT NULL,
-    reason_detail text,
-    payload jsonb,
-    inserted_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (price_id, reason_code)
-);
-
 CREATE TABLE IF NOT EXISTS dq.etl_runs (
     id bigserial PRIMARY KEY,
     run_type varchar(15) NOT NULL DEFAULT 'backfill'
@@ -149,6 +154,7 @@ CREATE TABLE IF NOT EXISTS dq.etl_runs (
         CONSTRAINT ck_etl_runs_triggered_by
         CHECK (triggered_by IN ('manual')),
     error_message text,
+    inserted_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT etl_runs_no_overlap
         EXCLUDE USING gist (
             daterange(data_interval_start, data_interval_end) WITH &&
@@ -170,5 +176,17 @@ CREATE TABLE IF NOT EXISTS dq.etl_run_stages (
     rows_quarantined bigint,
     details jsonb,
     error_message text,
+    inserted_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT uq_etl_run_stages_run_id_stage_name UNIQUE (run_id, stage_name)
+);
+
+CREATE TABLE IF NOT EXISTS dq.quarantine_prices (
+    price_id bigint NOT NULL,
+    run_id bigint NOT NULL
+        REFERENCES dq.etl_runs(id) ON DELETE CASCADE,
+    reason_code varchar(30) NOT NULL,
+    reason_detail text,
+    payload jsonb,
+    inserted_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, price_id, reason_code)
 );

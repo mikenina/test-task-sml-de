@@ -6,20 +6,12 @@ import psycopg2
 from etl.audit import Audit
 from etl.config import ConfigError, get_as_of, parse_args, validate_interval
 from etl.db import connect
-from etl.loader_core import load_core_reference, load_core_price
-from etl.loader_raw import (
-    load_price_body_types,
-    load_price_dates,
-    load_prices,
-    load_reference,
-)
+from etl.loader_core import load_core_price, load_core_reference
+from etl.loader_raw import load_source_to_raw
 from etl.stages import (
-    STAGE_CORE_PRICE,
-    STAGE_CORE_REFERENCE,
-    STAGE_RAW_PRICE_BODY_TYPES,
-    STAGE_RAW_PRICE_DATES,
-    STAGE_RAW_PRICES,
-    STAGE_RAW_REFERENCE,
+    STAGE_RAW_TO_CORE_PRICE,
+    STAGE_RAW_TO_CORE_REFERENCE,
+    STAGE_SOURCE_TO_RAW,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -68,35 +60,27 @@ def run():
     )
 
     try:
-        # ---- source -> raw ----
-        run_stage(
-            audit, STAGE_RAW_REFERENCE,
-            lambda: {"details": load_reference(data_conn, run_id)},
-        )
-        data_conn.commit()
+        # ---- source -> raw: один DO-блок, одна транзакция ----
+        try:
+            run_stage(
+                audit, STAGE_SOURCE_TO_RAW,
+                lambda: load_source_to_raw(
+                    data_conn, run_id,
+                    args.interval_start, args.interval_end,
+                ),
+            )
+            data_conn.commit()
 
-        run_stage(
-            audit, STAGE_RAW_PRICES,
-            lambda: {"rows_out": load_prices(
-                data_conn, run_id, args.interval_start, args.interval_end)},
-        )
-        data_conn.commit()
+            with data_conn.cursor() as cur:
+                for t in ("prices", "price_body_types", "price_dates",
+                          "cities", "body_types", "exchange_rates"):
+                    cur.execute(f"ANALYZE raw.{t}")
+            data_conn.commit()
+        except Exception:
+            data_conn.rollback()
+            raise
 
-        run_stage(
-            audit, STAGE_RAW_PRICE_DATES,
-            lambda: {"rows_out": load_price_dates(
-                data_conn, run_id, args.interval_start, args.interval_end)},
-        )
-        data_conn.commit()
-
-        run_stage(
-            audit, STAGE_RAW_PRICE_BODY_TYPES,
-            lambda: {"rows_out": load_price_body_types(
-                data_conn, run_id, args.interval_start, args.interval_end)},
-        )
-        data_conn.commit()
-
-        # ---- raw -> core ----
+        # ---- raw -> core: две стадии в одной транзакции ----
         try:
             with data_conn.cursor() as cur:
                 cur.execute(
@@ -106,15 +90,16 @@ def run():
                 )
 
             run_stage(
-                audit, STAGE_CORE_REFERENCE,
+                audit, STAGE_RAW_TO_CORE_REFERENCE,
                 lambda: load_core_reference(data_conn, run_id),
             )
 
             run_stage(
-                audit, STAGE_CORE_PRICE,
+                audit, STAGE_RAW_TO_CORE_PRICE,
                 lambda: load_core_price(
                     data_conn, run_id,
-                    args.interval_start, args.interval_end, as_of),
+                    args.interval_start, args.interval_end, as_of,
+                ),
             )
 
             data_conn.commit()

@@ -23,8 +23,8 @@ def validate_interval(start, end):
     delta = (end - start).days
     if delta < 1:
         raise ConfigError(f"interval must be >= 1 day, got {delta}")
-    if delta > 4 * 365 + 1:
-        raise ConfigError(f"interval must be <= 4 years, got {delta} days")
+    if delta > 5 * 365 + 1:
+        raise ConfigError(f"interval must be <= 5 years, got {delta} days")
 
 
 def get_as_of():

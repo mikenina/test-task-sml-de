@@ -1,11 +1,62 @@
-def load_core_price(conn, run_id, interval_start, interval_end, as_of):
+def load_core_reference(conn, run_id):
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM dq.quarantine_prices "
-            "WHERE price_id IN (SELECT id FROM raw.prices WHERE run_id = %s)",
+            """
+            WITH dedup AS (
+                SELECT DISTINCT ON (gc_id)
+                    gc_id,
+                    id AS city_id,
+                    name,
+                    NULLIF(TRIM(split_part(full_name_local, ',', 2)), '') AS region,
+                    latitude,
+                    longitude
+                FROM raw.cities
+                WHERE run_id = %s
+                ORDER BY gc_id, id
+            )
+            INSERT INTO core.city (gc_id, city_id, name, region, latitude, longitude)
+            SELECT gc_id, city_id, name, region, latitude, longitude
+            FROM dedup
+            ON CONFLICT (gc_id) DO UPDATE SET
+                city_id = EXCLUDED.city_id,
+                name = EXCLUDED.name,
+                region = EXCLUDED.region,
+                latitude = EXCLUDED.latitude,
+                longitude = EXCLUDED.longitude
+            """,
             (run_id,),
         )
+        city_count = cur.rowcount
 
+        cur.execute(
+            """
+            INSERT INTO core.body_type (id, name, body_group_id)
+            SELECT
+                bt.id,
+                bt.name,
+                CASE
+                    WHEN bt.std_id = 56 THEN 1
+                    WHEN bt.std_id = 4  THEN 2
+                    WHEN bt.std_id = 2  THEN 3
+                    WHEN bt.std_id = 15 THEN 4
+                    ELSE 5
+                END
+            FROM raw.body_types bt
+            WHERE run_id = %s
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name,
+                body_group_id = EXCLUDED.body_group_id
+            """,
+            (run_id,),
+        )
+        bt_count = cur.rowcount
+
+    return {"details": {"cities": city_count, "body_types": bt_count}}
+
+
+def load_core_price(conn, run_id, interval_start, interval_end, as_of):
+    with conn.cursor() as cur:
+        # --- DQ: карантин ---
         cur.execute(
             """
             WITH p AS (
@@ -21,6 +72,17 @@ def load_core_price(conn, run_id, interval_start, interval_end, as_of):
                 FROM raw.exchange_rates WHERE run_id = %s
                 ORDER BY num_code, setting_date, id
             ),
+            pbt_agg AS (
+                SELECT
+                    pbt.price_id,
+                    count(*) AS cnt,
+                    array_agg(DISTINCT cbt.body_group_id)
+                        FILTER (WHERE cbt.body_group_id IS NOT NULL) AS groups
+                FROM raw.price_body_types pbt
+                LEFT JOIN core.body_type cbt ON cbt.id = pbt.body_type_id
+                WHERE pbt.run_id = %s
+                GROUP BY pbt.price_id
+            ),
             enriched AS (
                 SELECT
                     p.id AS price_id,
@@ -30,18 +92,26 @@ def load_core_price(conn, run_id, interval_start, interval_end, as_of):
                     p.total_weight,
                     p.total_volume,
                     p.nearest_rate_date,
+                    mbt.id AS main_body_type_id,
+                    mbt.body_group_id AS main_body_group_id,
+                    (p.body_type IS NOT NULL AND mbt.id IS NULL) AS body_type_unknown,
                     (c1.gc_id IS NOT NULL) AS loading_ok,
                     (c2.gc_id IS NOT NULL) AS unloading_ok,
-                    (p.currency_code = '643' OR r.value IS NOT NULL) AS rate_ok
+                    (p.currency_code = '643' OR r.value IS NOT NULL) AS rate_ok,
+                    (COALESCE(pa.cnt, 0) > 0
+                     AND NOT COALESCE(mbt.body_group_id = ANY(pa.groups), false))
+                        AS body_type_mismatch
                 FROM p
+                LEFT JOIN core.body_type mbt ON mbt.id = p.body_type
                 LEFT JOIN cities c1 ON c1.gc_id = p.loading_city_gcid
                 LEFT JOIN cities c2 ON c2.gc_id = p.unloading_city_gcid
                 LEFT JOIN rates r
                     ON r.num_code = p.currency_code
                    AND r.setting_date = p.nearest_rate_date
+                LEFT JOIN pbt_agg pa ON pa.price_id = p.id
             )
-            INSERT INTO dq.quarantine_prices (price_id, reason_code, reason_detail, payload)
-            SELECT e.price_id, r.code, r.detail, to_jsonb(e)
+            INSERT INTO dq.quarantine_prices (run_id, price_id, reason_code, reason_detail, payload)
+            SELECT %s, e.price_id, r.code, r.detail, to_jsonb(e)
             FROM enriched e
             CROSS JOIN LATERAL (VALUES
                 ('price_non_positive', 'price <= 0',
@@ -57,15 +127,20 @@ def load_core_price(conn, run_id, interval_start, interval_end, as_of):
                 ('city_unknown', 'loading or unloading city not in cities',
                     (NOT e.loading_ok OR NOT e.unloading_ok)),
                 ('rate_missing', 'no rate on nearest_rate_date',
-                    (e.currency_code <> '643' AND NOT e.rate_ok))
+                    (e.currency_code <> '643' AND NOT e.rate_ok)),
+                ('body_type_unknown', 'prices.body_type not in core.body_type',
+                    e.body_type_unknown),
+                ('body_type_mismatch', 'price_body_types non-empty but does not contain main body group',
+                    e.body_type_mismatch)
             ) AS r(code, detail, is_bad)
             WHERE r.is_bad
             ON CONFLICT DO NOTHING
             """,
-            (run_id, run_id, run_id),
+            (run_id, run_id, run_id, run_id, run_id, ),
         )
         quarantined = cur.rowcount
 
+        # --- Факты ---
         cur.execute(
             """
             WITH p AS (
@@ -76,20 +151,21 @@ def load_core_price(conn, run_id, interval_start, interval_end, as_of):
                 FROM raw.cities WHERE run_id = %s
                 ORDER BY gc_id, id
             ),
-            bt AS (
-                SELECT id, std_id FROM raw.body_types WHERE run_id = %s
-            ),
             rates AS (
                 SELECT DISTINCT ON (num_code, setting_date) num_code, setting_date, value
                 FROM raw.exchange_rates WHERE run_id = %s
                 ORDER BY num_code, setting_date, id
             ),
-            primary_body AS (
-                SELECT DISTINCT ON (pbt.price_id) pbt.price_id, bt.std_id
+            pbt_agg AS (
+                SELECT
+                    pbt.price_id,
+                    count(*) AS cnt,
+                    array_agg(DISTINCT cbt.body_group_id)
+                        FILTER (WHERE cbt.body_group_id IS NOT NULL) AS groups
                 FROM raw.price_body_types pbt
-                LEFT JOIN bt ON bt.id = pbt.body_type_id
+                LEFT JOIN core.body_type cbt ON cbt.id = pbt.body_type_id
                 WHERE pbt.run_id = %s
-                ORDER BY pbt.price_id, pbt.id
+                GROUP BY pbt.price_id
             ),
             enriched AS (
                 SELECT
@@ -107,56 +183,42 @@ def load_core_price(conn, run_id, interval_start, interval_end, as_of):
                     p.outlier_mark,
                     p.is_fact,
                     p.complex,
-                    p.body_type,
                     p.weight_category AS raw_weight_cat,
                     p.volume_category AS raw_volume_cat,
-                    c1.gc_id AS loading_ok,
-                    c2.gc_id AS unloading_ok,
+                    mbt.id AS main_body_type_id,
+                    (p.body_type IS NOT NULL AND mbt.id IS NULL) AS body_type_unknown,
+                    (c1.gc_id IS NOT NULL) AS loading_ok,
+                    (c2.gc_id IS NOT NULL) AS unloading_ok,
                     r.value AS rate_value,
                     CASE
                         WHEN p.currency_code = '643' THEN p.price
                         WHEN r.value IS NOT NULL THEN p.price * r.value
                         ELSE NULL
                     END AS price_rub,
-                    CASE
-                        WHEN pb.std_id = 56 THEN 'Тент'
-                        WHEN pb.std_id = 4 THEN 'Рефрижератор'
-                        WHEN pb.std_id = 2 THEN 'Изотерм'
-                        WHEN pb.std_id = 15 THEN 'Борт'
-                        WHEN pb.std_id IS NOT NULL THEN 'Прочие'
-                        WHEN p.body_type IS NOT NULL THEN (
-                            SELECT CASE
-                                WHEN bt2.id IN (56,57,58,59,60,61) THEN 'Тент'
-                                WHEN bt2.id IN (4,46,47,48) THEN 'Рефрижератор'
-                                WHEN bt2.id = 2 THEN 'Изотерм'
-                                WHEN bt2.id IN (1,15) THEN 'Борт'
-                                ELSE 'Прочие'
-                            END
-                            FROM bt bt2 WHERE bt2.id = p.body_type
-                        )
-                        ELSE 'Не указан'
-                    END AS body_group
+                    (COALESCE(pa.cnt, 0) > 0
+                     AND NOT COALESCE(mbt.body_group_id = ANY(pa.groups), false))
+                        AS body_type_mismatch
                 FROM p
+                LEFT JOIN core.body_type mbt ON mbt.id = p.body_type
                 LEFT JOIN cities c1 ON c1.gc_id = p.loading_city_gcid
                 LEFT JOIN cities c2 ON c2.gc_id = p.unloading_city_gcid
                 LEFT JOIN rates r
                     ON r.num_code = p.currency_code
                    AND r.setting_date = p.nearest_rate_date
-                LEFT JOIN primary_body pb ON pb.price_id = p.id
+                LEFT JOIN pbt_agg pa ON pa.price_id = p.id
             )
             INSERT INTO core.price (
-                price_id, loading_date,
-                loading_city_gcid, unloading_city_gcid,
+                price_id, loading_date, loading_city_gcid, unloading_city_gcid,
                 distance, total_weight, total_volume,
-                body_group, weight_category, volume_category,
+                main_body_type_id,
+                weight_category, volume_category,
                 price, currency_code, price_rub,
                 price_type, organization_id, outlier_mark
             )
             SELECT
-                price_id, loading_date,
-                loading_city_gcid, unloading_city_gcid,
+                price_id, loading_date, loading_city_gcid, unloading_city_gcid,
                 distance, total_weight, total_volume,
-                body_group,
+                main_body_type_id,
                 COALESCE(raw_weight_cat, CASE
                     WHEN round(total_weight::numeric, 1) >= 30 THEN 'G20T'
                     WHEN round(total_weight::numeric, 1) >= 10 THEN 'FTL'
@@ -183,34 +245,39 @@ def load_core_price(conn, run_id, interval_start, interval_end, as_of):
               AND (currency_code = '643' OR rate_value IS NOT NULL)
               AND NOT (currency_code = '643' AND price <= 1000)
               AND price_rub IS NOT NULL
+              AND NOT body_type_unknown
+              AND NOT body_type_mismatch
             """,
-            (run_id, run_id, run_id, run_id, run_id),
+            (run_id, run_id, run_id, run_id, ),
         )
         loaded = cur.rowcount
 
+        # --- Bridge: все группы (price_body_types) + fallback на main_body_type_id ---
         cur.execute(
             """
-            INSERT INTO core.price_body_group (price_id, body_group)
-            SELECT DISTINCT
-                pbt.price_id,
-                CASE
-                    WHEN bt.std_id = 56 THEN 'Тент'
-                    WHEN bt.std_id = 4 THEN 'Рефрижератор'
-                    WHEN bt.std_id = 2 THEN 'Изотерм'
-                    WHEN bt.std_id = 15 THEN 'Борт'
-                    WHEN bt.std_id IS NOT NULL THEN 'Прочие'
-                    ELSE 'Не указан'
-                END
+            INSERT INTO core.price_body_group (price_id, body_group_id)
+            SELECT DISTINCT pbt.price_id, cbt.body_group_id
             FROM raw.price_body_types pbt
-            LEFT JOIN raw.body_types bt
-                ON bt.id = pbt.body_type_id AND bt.run_id = pbt.run_id
+            JOIN core.body_type cbt ON cbt.id = pbt.body_type_id
             JOIN core.price cp ON cp.price_id = pbt.price_id
             WHERE pbt.run_id = %s
+
+            UNION
+
+            SELECT cp.price_id, cbt.body_group_id
+            FROM core.price cp
+            JOIN core.body_type cbt ON cbt.id = cp.main_body_type_id
+            WHERE cp.main_body_type_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM raw.price_body_types pbt
+                  WHERE pbt.price_id = cp.price_id AND pbt.run_id = %s
+              )
             ON CONFLICT DO NOTHING
             """,
-            (run_id,),
+            (run_id, run_id),
         )
 
+        # --- Помесячная развёртка, только до as_of ---
         cur.execute(
             """
             INSERT INTO core.price_dates (price_id, price_date)

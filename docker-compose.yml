@@ -35,6 +35,7 @@ services:
     volumes:
       - ./etl:/app/etl
     command: [ "sleep", "infinity" ]
+    init: true
 
 volumes:
   pgdata:

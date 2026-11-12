@@ -12,4 +12,7 @@ def connect(autocommit=False):
         password=os.environ["POSTGRES_PASSWORD"],
     )
     conn.autocommit = autocommit
+    with conn.cursor() as cur:
+        cur.execute("SET work_mem = '256MB'")
+        cur.execute("SET statement_timeout = '300s'")
     return conn
