@@ -11,7 +11,7 @@ _Дата выполнения:_ ноябрь 2026г.
 | [./docker/postgres/init/02_synthetic.sql](./docker/postgres/init/02_synthetic.sql) | скрипт заполнения source-бд синтетическими данными |
 | [./docker/postgres/init/03_dwh_init.sql](./docker/postgres/init/03_dwh_init.sql) | ddl DWH |
 | [.env.example](.env.example) | Переменные окружения (коннект к базе и др.) |
-| [./schemas/](./schemas/)| ER-diagrams |
+| [./schemas/](docs/schemas/)| ER-diagrams |
 | [./etl/loader_raw.py](./etl/loader_raw.py) | Реализация этапа source -> raw |
 | [./etl/loader_core.py](./etl/loader_core.py) | Реализация этапа raw -> core |
 | [./etl/main.py](./etl/main.py) | ETL flow |
@@ -62,131 +62,30 @@ docker compose exec postgres psql -U postgres -d deals_bigdata -c \
     "SELECT id, status, rows_out FROM dq.etl_run_stages ORDER BY id;"
 ```
 
-## 4. Архитектура
-
-### Границы решения
-Решение дано для объемов данных, заданных по умолчанию в synthetic.sql (300000 строк в таблице сделок).
-
-Решение представляет собой процесс ETL массовой загрузки данных из источника в витрины.
-Выбирает из источника сделки по loading_date, минимальный объем загрузки - 1 день, максимальный - 5 лет.
-Для запуска нужно указать `[interval-start, interval-end)`.
-Допускаются повторные запуски.
-
-Команда запуска для тестового задания:
-```bash 
-docker compose exec app python -m etl.main --interval-start 2023-01-01 --interval-end 2027-03-01
+### Проверка витрины
+```bash
+docker compose exec -T postgres psql -U postgres -d deals_bigdata <<'SQL'
+SELECT
+    c1.name AS from_city,
+    c2.name AS to_city,
+    COALESCE(bg.name, 'Не указан') AS body_group,
+    rc.weight_category,
+    rc.month,
+    rc.trips_count,
+    rc.carriers_count,
+    rc.median_trip,
+    rc.median_km,
+    rc.mom_pct,
+    rc.reliability_level
+FROM mart.route_card rc
+JOIN core.city c1 ON c1.gc_id = rc.loading_city_gcid
+JOIN core.city c2 ON c2.gc_id = rc.unloading_city_gcid
+LEFT JOIN core.body_group bg ON bg.id = rc.body_group_id
+WHERE rc.loading_city_gcid = 1001
+  AND rc.unloading_city_gcid = 1003
+ORDER BY rc.month DESC
+LIMIT 10;
+SQL
 ```
 
-#### Сценарии запуска на ПРОДЕ:
-1) Регулярный ночной сбор "за вчера", на интервале [yesterday, today).
-2) Технический пересбор за произвольный интервал (перезаливка данных после сбоев).
-3) данные для прогноза - todo
-4) Реализованный процесс НЕ предназначен для инкрементальной загрузки изменений сущностей.
-
-DWH расположен в той же бд, что и источник - БД deals_bigdata (для простоты).
-DWH состоит из 4-х слоев: raw, core, mart, data quality.
-
-Один запуск ETL за интервал - запускает последовательные синхронные переносы данных `source -> ... -> mart`.
-
-Возможные статусы ETL процесса: `running / success / failed`.
-Статус ETL фиксируется в `dq.etl_runs`. Частичный gist-constraint на этой таблице препятствует запуску параллельных ETL-процессов за пересекающиеся интервалы.
-
-Каждый новый запуск ETL - это новый run. Перезапуск упавших run в этом решении не предусмотрен.
-
-В задании указана дата, после которой сделки считаются прогнозом.
-В решении она фиксирована в .env: `AS_OF=2026-10-26`
-
-### Этап source -> raw (./etl/loader_raw.py)
-* В слое raw храним снимки состояния источника на момент запуска конкретного ETL с версионированием по run_id.
-
-* В данном решении для простоты снимки хранятся в postgres, но в целом это может быть MergeTree Clickhouse или файлы на диске в parquet-формате.
-
-* Снимок состояния дает нам уверенность в консистентности данных, используемых для построения аналитического слоя.
-
-* Данные raw-слоя могут быть использованы для расследования инцидентов загрузок. В реальных условиях стоит определить ttl хранения данных в raw-слое.
-
-* Загрузка выполняется как `insert into ... select ...`.
-
-* Если в процессе переноса в raw-слой возникает ошибка, то процесс ETL останавливается с записью в аудит.
-
-### Этап raw -> core (./etl/loader_core.py)
-* Core-слой содержит очищенные эталонные данные сделок, актуальные на момент запуска ETL-процесса. 
-
-* Core хранит одну актуальную версию каждой сделки (без версионирования). Данные накапливаются за все периоды, по которым выполнялись загрузки. При повторной загрузке интервала перезаписываются только сделки этого интервала; данные других интервалов остаются без изменений.
-
-* Если ETL запускается за какой-то интервал повторно, и данные в источнике за этот интервал изменились, то в core-слое 
-  * сделки перезапишутся (`delete`);
-  * словари пополнятся новыми значениями (если появились) или словарные значения обновятся (в случае переименования в источнике); 
-  * загрузка словарей выполняется как `INSERT INTO core.dict ... from raw.dict ... on conflict ... do update set ...`.
-
-* Если в процессе переноса в core-слой возникает ошибка, то процесс ETL останавливается с записью в аудит. Изменения в core-слое откатываются.
-
-* Строки с аномалиями записываются в `dq.quarantine_prices`.
-
-#### Правила очистки при переносе в core-слой:
-
-| Нарушение | Код причины в dq.quarantine_prices | Комментарий |
-|-----|-------------|------------|
-| price <= 0 | price_non_positive | |
-| для RUB price <= 1000 | price_too_low_rub | |
-| distance <= 0 | distance_invalid | |
-| total_weight < 0 | weight_negative | |
-| total_volume < 0 | volume_negative | |
-| отсутствие города погрузки/отгрузки в справочнике `raw.cities` | city_unknown | |
-| Нет точного курса валют на `nearest_rate_date` | rate_missing | |
-| поле `gc_id` в источнике городов не уникально | | оставляем гео с наименьшим id |
-| `raw.prices.body_type` нет в справочнике | body_type_unknown | |
-| неконсистентный основной кузов (`raw.prices.body_type`)* | body_type_mismatch | см ниже |
-
-Если у одной сделки есть несколько аномалий, то в `dq.quarantine_prices` будет добавлено m строк по количеству причин.
-
-```
-В расчёт исторических рыночных показателей включаются только **фактические завершённые прямые перевозки** (`is_fact = true`, то есть `price_type IN (1, 2, 3, 4, 5, 9)`, `complex = false`) с корректными физическими параметрами (`price > 0`, `distance > 0`). Ставки торгов (`price_type = 6`, `is_fact = false`) в обязательный scope не входят.
-``` 
- 
-#### Правила унификации групп кузова
-```
-... У одной сделки может быть указано несколько дочерних типов кузова из 1С (или body_type IS NULL). 
-... Для одной цены и одной стандартной группы кузова должна остаться только одна строка; отсутствие связи с `price_body_types` означает fallback на `prices.body_type`, а затем `Не указан`.
-... Стандартизированная группа/тип кузова (body_group / body_type — рефрижераторные и специализированные кузова тарифицируются существенно выше тента и борта)
-```
-**Правила приведения типа кузова к стандартной группе**
-- Тент (id IN (56, 57, 58, 59, 60, 61) → std_id = 56);
-- Рефрижератор (id IN (4, 46, 47, 48) → std_id = 4);
-- Изотерм (id = 2 → std_id = 2);
-- Борт (id IN (1, 15) → std_id = 15);
-- Прочие (остальные коды) 
-- Не указан (NULL)
-
-***Правила проверки консистентности типа кузова**
-
-Реализована сверка данных источника: если выбран основной тип кузова (`raw.prices.body_type`), то он обязан присутствовать в `raw.price_body_types` (на уровне стандартной группы). |
-
-| `raw.prices.body_type` | `raw.price_body_types` | Результат | Комментарий |
-|-----|-------------|------------|------------|
-| NULL | непустой | not valid | cделка уезжает в `dq.quarantine_prices` |
-| NULL | пустой | valid | |
-| NOT NULL | пустой | valid | fallback на `raw.prices.body_type` |
-| NOT NULL | непустой + стандартные группы пересекаются | valid |
-| NOT NULL | непустой + стандартные группы НЕ пересекаются | not valid | cделка уезжает в `dq.quarantine_prices` |
-
-#### Правила унификации веса и объема:
-
-`weight_category`
-
-| `raw.prices.weight_category` | `core.price.weight_category` |
-|-----|-------------|
-| >= 30 | G20T | 
-| [10;30) | FTL |
-| [5;10) | 10T |
-| [2,5;5) | 5T |
-| [0,5;2,5) | L5T |
-| <= 0,5 | OTH |
-
-`volume_category`
-
-| `raw.prices.volume_category` | `core.price.volume_category` |
-|-----|-------------|
-| (0;120) | FTL |
-| иначе | OTH |
-
+## 4. [Архитектура решения (./docs/architecture.md)](./docs/architecture.md)

@@ -7,8 +7,10 @@ from etl.audit import Audit
 from etl.config import ConfigError, get_as_of, parse_args, validate_interval
 from etl.db import connect
 from etl.loader_core import load_core_price, load_core_reference
+from etl.loader_mart import rebuild_mart_route_card
 from etl.loader_raw import load_source_to_raw
 from etl.stages import (
+    STAGE_MART_ROUTE_CARD,
     STAGE_RAW_TO_CORE_PRICE,
     STAGE_RAW_TO_CORE_REFERENCE,
     STAGE_SOURCE_TO_RAW,
@@ -60,7 +62,7 @@ def run():
     )
 
     try:
-        # ---- source -> raw: один DO-блок, одна транзакция ----
+        # ---- source -> raw ----
         try:
             run_stage(
                 audit, STAGE_SOURCE_TO_RAW,
@@ -80,7 +82,7 @@ def run():
             data_conn.rollback()
             raise
 
-        # ---- raw -> core: две стадии в одной транзакции ----
+        # ---- raw -> core ----
         try:
             with data_conn.cursor() as cur:
                 cur.execute(
@@ -102,6 +104,24 @@ def run():
                 ),
             )
 
+            data_conn.commit()
+        except Exception:
+            data_conn.rollback()
+            raise
+
+        # ---- ANALYZE core перед mart ----
+        with data_conn.cursor() as cur:
+            for t in ("price", "price_body_group", "price_dates",
+                      "city", "body_group", "body_type"):
+                cur.execute(f"ANALYZE core.{t}")
+        data_conn.commit()
+
+        # ---- core -> mart (full refresh) ----
+        try:
+            run_stage(
+                audit, STAGE_MART_ROUTE_CARD,
+                lambda: rebuild_mart_route_card(data_conn, as_of),
+            )
             data_conn.commit()
         except Exception:
             data_conn.rollback()

@@ -135,6 +135,45 @@ CREATE TABLE IF NOT EXISTS core.price_dates (
     PRIMARY KEY (price_id, price_date)
 );
 
+CREATE TABLE IF NOT EXISTS mart.route_card (
+    month date NOT NULL,
+    loading_city_gcid integer NOT NULL,
+    unloading_city_gcid integer NOT NULL,
+    body_group_id smallint NOT NULL,
+    weight_category varchar(4) NOT NULL,
+
+    trips_count bigint NOT NULL,
+    carriers_count bigint NOT NULL,
+
+    p25_trip numeric(14,2) NOT NULL,
+    median_trip numeric(14,2) NOT NULL,
+    p75_trip numeric(14,2) NOT NULL,
+    avg_trip numeric(14,2) NOT NULL,
+
+    p25_km numeric(10,2) NOT NULL,
+    median_km numeric(10,2) NOT NULL,
+    p75_km numeric(10,2) NOT NULL,
+
+    cv_rate numeric(10,4),
+    mom_pct numeric(10,2),
+    yoy_pct numeric(10,2),
+
+    reliability_level varchar(10) NOT NULL
+        CONSTRAINT ck_route_card_reliability
+        CHECK (reliability_level IN ('HIGH', 'MEDIUM', 'LOW_DATA')),
+
+    CONSTRAINT pk_route_card PRIMARY KEY (
+        month, loading_city_gcid, unloading_city_gcid,
+        body_group_id, weight_category
+    )
+);
+
+COMMENT ON COLUMN mart.route_card.body_group_id IS
+    'body_group_id = 0 = «Не указан»; 1..5 соответствует core.body_group.id.';
+
+CREATE INDEX IF NOT EXISTS idx_route_card_route
+    ON mart.route_card (loading_city_gcid, unloading_city_gcid, body_group_id, weight_category, month);
+
 -- ============================================================
 -- DQ
 -- ============================================================
