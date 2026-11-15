@@ -163,3 +163,17 @@ DWH состоит из 4-х слоев: **raw, core, mart, data quality**.
 | trips_count >= 30, carriers_count >= 5 и свежесть последнего месяца не более 30 дней относительно as_of | HIGH |
 | trips_count >= 10 | MEDIUM |
 | иначе | LOW_DATA |
+
+
+## ML: метрики на test
+
+Split: `train = [2026-07-26, 2026-10-05)`, `test = [2026-10-05, 2026-10-26]`.
+`as_of = 2026-10-26`, `random_seed = 42`, `shuffle = False`.
+
+| Метрика | CatBoost (основная) | DecisionTree (baseline) |
+|---|---|---|
+| R² | **0.921** | 0.873 |
+| MAPE, % | **16.19** | 17.93 |
+| RMSE, ₽ | **53 638** | 68 114 |
+| MAE, ₽ | **27 974** | 32 803 |
+| n test | 12 808 | 12 808 |

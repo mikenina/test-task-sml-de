@@ -34,6 +34,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./etl:/app/etl
+      - ./ml:/app/ml
     command: [ "sleep", "infinity" ]
     init: true
 

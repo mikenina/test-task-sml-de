@@ -12,10 +12,10 @@ CREATE SCHEMA IF NOT EXISTS core;
 CREATE SCHEMA IF NOT EXISTS mart;
 CREATE SCHEMA IF NOT EXISTS dq;
 
-COMMENT ON SCHEMA raw IS 'Immutable snapshots источника, версионированные по run_id.';
-COMMENT ON SCHEMA core IS 'Очищенные эталонные данные (без SCD).';
-COMMENT ON SCHEMA mart IS 'Аналитические витрины.';
-COMMENT ON SCHEMA dq IS 'Аудит ETL, карантин, статистика качества.';
+COMMENT ON SCHEMA raw IS 'Immutable snapshots источника, версионированные по run_id';
+COMMENT ON SCHEMA core IS 'Очищенные эталонные данные';
+COMMENT ON SCHEMA mart IS 'Аналитические витрины';
+COMMENT ON SCHEMA dq IS 'Аудит ETL, карантин, статистика качества';
 
 
 -- ============================================================
@@ -135,6 +135,10 @@ CREATE TABLE IF NOT EXISTS core.price_dates (
     PRIMARY KEY (price_id, price_date)
 );
 
+-- ============================================================
+-- MART
+-- ============================================================
+
 CREATE TABLE IF NOT EXISTS mart.route_card (
     month date NOT NULL,
     loading_city_gcid integer NOT NULL,
@@ -173,6 +177,24 @@ COMMENT ON COLUMN mart.route_card.body_group_id IS
 
 CREATE INDEX IF NOT EXISTS idx_route_card_route
     ON mart.route_card (loading_city_gcid, unloading_city_gcid, body_group_id, weight_category, month);
+
+
+CREATE TABLE IF NOT EXISTS mart.ml_price_predictions (
+    price_id bigint PRIMARY KEY,
+    loading_date date NOT NULL,
+    loading_city_gcid integer NOT NULL,
+    unloading_city_gcid integer NOT NULL,
+    body_group_id smallint,
+    actual_price_rub numeric(14,2),
+    predicted_price_rub numeric(14,2) NOT NULL,
+    abs_error_rub numeric(14,2),
+    ape_pct numeric(10,2),
+    model_name text NOT NULL,
+    scored_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ml_price_predictions_loading_date
+    ON mart.ml_price_predictions (loading_date);
 
 -- ============================================================
 -- DQ

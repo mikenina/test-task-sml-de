@@ -31,7 +31,10 @@ from etl.stages import (
     STAGE_RAW_TO_CORE_REFERENCE,
     STAGE_SOURCE_TO_RAW,
     STAGE_SOURCE_TO_RAW_CHANGES,
+    STAGE_ML
 )
+
+from ml.main import run_ml_pipeline
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("etl")
@@ -112,6 +115,16 @@ def run_backfill(audit, data_conn, run_id, args, as_of):
         data_conn.rollback()
         raise
 
+    try:
+        run_stage(
+            audit, STAGE_ML,
+            lambda: run_ml_pipeline(data_conn, as_of),
+        )
+        data_conn.commit()
+    except Exception:
+        data_conn.rollback()
+        raise
+
 
 def run_incremental(audit, data_conn, run_id, args, as_of):
     window_start, window_end = get_incremental_window(as_of)
@@ -154,6 +167,16 @@ def run_incremental(audit, data_conn, run_id, args, as_of):
         run_stage(
             audit, STAGE_MART_ROUTE_CARD,
             lambda: rebuild_mart_route_card_partitions(data_conn, as_of),
+        )
+        data_conn.commit()
+    except Exception:
+        data_conn.rollback()
+        raise
+
+    try:
+        run_stage(
+            audit, STAGE_ML,
+            lambda: run_ml_pipeline(data_conn, as_of),
         )
         data_conn.commit()
     except Exception:
