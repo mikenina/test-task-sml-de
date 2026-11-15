@@ -1,9 +1,28 @@
-def rebuild_mart_route_card(conn, as_of):
+from dateutil.relativedelta import relativedelta
+
+def _next_month_start(d):
+    return (d.replace(day=1) + relativedelta(months=1))
+
+
+def _rebuild_mart_route_card(conn, as_of, month_from=None, month_to=None):
     with conn.cursor() as cur:
-        cur.execute("TRUNCATE mart.route_card")
+        if month_from is not None:
+            cur.execute(
+                "DELETE FROM mart.route_card "
+                "WHERE month >= %s AND month <= %s",
+                (month_from, month_to),
+            )
+            date_from = month_from
+            date_to = _next_month_start(month_to)
+            base_filter = "AND pd.price_date >= %s AND pd.price_date < %s"
+            base_params = (date_from, date_to)
+        else:
+            cur.execute("TRUNCATE mart.route_card")
+            base_filter = ""
+            base_params = ()
 
         cur.execute(
-            """
+            f"""
             WITH base AS (
                 SELECT
                     date_trunc('month', pd.price_date)::date AS month,
@@ -21,6 +40,9 @@ def rebuild_mart_route_card(conn, as_of):
                 LEFT JOIN core.price_body_group pbg ON pbg.price_id = p.price_id
                 WHERE p.outlier_mark = false
                   AND p.price_rub > 0
+                  AND p.distance > 0
+                  AND pd.price_date <= %s
+                  {base_filter}
             ),
             agg AS (
                 SELECT
@@ -111,7 +133,21 @@ def rebuild_mart_route_card(conn, as_of):
                 END
             FROM with_deltas
             """,
-            (as_of,),
+            (as_of, *base_params, as_of),
         )
         rows = cur.rowcount
     return {"rows_out": rows}
+
+
+def rebuild_mart_route_card(conn, as_of):
+    return _rebuild_mart_route_card(conn, as_of)
+
+
+def rebuild_mart_route_card_partitions(conn, as_of):
+    month_start = as_of.replace(day=1)
+    month_prev = month_start - relativedelta(months=1)
+    return _rebuild_mart_route_card(
+        conn, as_of,
+        month_from=month_prev,
+        month_to=month_start,
+    )

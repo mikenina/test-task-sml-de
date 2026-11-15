@@ -49,17 +49,36 @@ docker compose exec postgres psql -U postgres -d deals_bigdata -c "\dn"
 (5 rows)
 ```
 
-## 3. Запуск ETL
+## 3. Запуск ETL за весь период синтетич. данных
 ```bash
-docker compose exec app python -m etl.main \
-    --interval-start 2023-01-01 \
-    --interval-end 2027-03-01
+docker compose exec app python -m etl.main --run-type backfill --as-of 2026-10-26 \
+    --interval-start 2023-10-03 --interval-end 2027-02-13 
 ```
 
 ### Проверка результата
 ```bash
 docker compose exec postgres psql -U postgres -d deals_bigdata -c \
-    "SELECT id, status, rows_out FROM dq.etl_run_stages ORDER BY id;"
+    "SELECT * FROM dq.etl_run_stages ORDER BY id;"
+```
+
+```bash
+docker compose exec postgres psql -U postgres -d deals_bigdata -c \
+    "select max(loading_date) from core.price"
+```
+```bash
+    max     
+------------
+ 2027-02-13
+```
+
+```bash
+docker compose exec postgres psql -U postgres -d deals_bigdata -c \
+    "select max(month) from mart.route_card"
+```
+```bash
+    max     
+------------
+ 2026-10-01
 ```
 
 ### Проверка витрины
@@ -88,4 +107,35 @@ LIMIT 10;
 SQL
 ```
 
-## 4. [Архитектура решения (./docs/architecture.md)](./docs/architecture.md)
+## 4. Запуск ETL с фиксированным as-of
+```bash
+docker compose exec postgres psql -U postgres -d deals_bigdata -c     "select count(*) from core.price"
+ count  
+--------
+ 244247
+
+docker compose exec postgres psql -U postgres -d deals_bigdata -c     "select count(*) from mart.route_card"
+ count  
+--------
+ 203644
+```
+
+```bash
+docker compose exec app python -m etl.main --run-type incremental --as-of 2026-10-26
+```
+
+### Проверка результата
+```bash
+docker compose exec postgres psql -U postgres -d deals_bigdata -c     "select count(*) from core.price"
+ count  
+--------
+ 244247
+
+docker compose exec postgres psql -U postgres -d deals_bigdata -c     "select count(*) from mart.route_card"
+ count  
+--------
+ 203644
+```
+
+
+## 5. [Архитектура решения (./docs/architecture.md)](./docs/architecture.md)

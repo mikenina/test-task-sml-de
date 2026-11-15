@@ -5,13 +5,13 @@ class Audit:
         self.conn = conn
         self.run_id = None
 
-    def start_run(self, interval_start, interval_end, triggered_by):
+    def start_run(self, interval_start, interval_end, triggered_by, run_type):
         with self.conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO dq.etl_runs "
-                "(data_interval_start, data_interval_end, triggered_by) "
-                "VALUES (%s, %s, %s) RETURNING id",
-                (interval_start, interval_end, triggered_by),
+                "(run_type, data_interval_start, data_interval_end, triggered_by) "
+                "VALUES (%s, %s, %s, %s) RETURNING id",
+                (run_type, interval_start, interval_end, triggered_by),
             )
             self.run_id = cur.fetchone()[0]
 

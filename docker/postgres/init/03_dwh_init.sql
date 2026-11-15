@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS dq.etl_runs (
     run_started_at timestamptz NOT NULL DEFAULT now(),
     run_finished_at timestamptz,
     data_interval_start date NOT NULL,
-    data_interval_end date NOT NULL,
+    data_interval_end date,
     status varchar(10) NOT NULL DEFAULT 'running'
         CONSTRAINT ck_etl_runs_status
         CHECK (status IN ('running', 'success', 'failed')),
@@ -194,10 +194,8 @@ CREATE TABLE IF NOT EXISTS dq.etl_runs (
         CHECK (triggered_by IN ('manual')),
     error_message text,
     inserted_at timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT etl_runs_no_overlap
-        EXCLUDE USING gist (
-            daterange(data_interval_start, data_interval_end) WITH &&
-        ) WHERE (status = 'running')
+    CONSTRAINT etl_runs_single_running
+        EXCLUDE USING gist ((1) WITH =) WHERE (status = 'running')
 );
 
 CREATE TABLE IF NOT EXISTS dq.etl_run_stages (
