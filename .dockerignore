@@ -16,4 +16,5 @@ pgdata
 .vscode
 README.md
 docs
-tests
+tests/**/__pycache__
+tests/**/*.pyc

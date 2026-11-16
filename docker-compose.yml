@@ -35,6 +35,8 @@ services:
     volumes:
       - ./etl:/app/etl
       - ./ml:/app/ml
+      - ./tests:/app/tests
+      - ./Makefile:/app/Makefile
     command: [ "sleep", "infinity" ]
     init: true
 
