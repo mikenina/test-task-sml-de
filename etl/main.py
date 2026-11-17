@@ -39,7 +39,9 @@ from ml.main import run_ml_pipeline
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("etl")
 
-def get_incremental_window(as_of):
+def get_incremental_window(as_of, interval_start=None, interval_end=None):
+    if interval_start is not None:
+        return interval_start, interval_end
     return as_of - timedelta(days=1), None
 
 def run_stage(audit, name, fn):
@@ -125,15 +127,14 @@ def run_backfill(audit, data_conn, run_id, args, as_of):
         data_conn.rollback()
         raise
 
-
-def run_incremental(audit, data_conn, run_id, args, as_of):
-    window_start, window_end = get_incremental_window(as_of)
+def run_incremental(audit, data_conn, run_id, args, as_of, interval_start, interval_end):
+    window_start, window_end = get_incremental_window(as_of, interval_start, interval_end)
 
     try:
         run_stage(
             audit, STAGE_SOURCE_TO_RAW_CHANGES,
             lambda: load_source_to_raw_changes(
-                data_conn, run_id, window_start,
+                data_conn, run_id, window_start, window_end,
             ),
         )
         data_conn.commit()
@@ -203,14 +204,14 @@ def run():
             interval_start = args.interval_start
             interval_end = args.interval_end
         else:
-            interval_start, interval_end = get_incremental_window(as_of)
+            interval_start, interval_end = get_incremental_window(
+                as_of, args.interval_start, args.interval_end,
+            )
 
         audit.start_run(interval_start, interval_end, args.triggered_by,
                         run_type=args.run_type)
     except psycopg2.errors.ExclusionViolation:
-        log.error(
-            "another ETL run is in progress; aborting"
-        )
+        log.error("another ETL run is in progress; aborting")
         data_conn.close()
         audit_conn.close()
         return 1

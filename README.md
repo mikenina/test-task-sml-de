@@ -155,7 +155,7 @@ SQL
 
 ```
 
-### Запуск ETL с фиксированным as-of
+### Инкрементальный запуск ETL 
 
 ```bash
 docker compose exec app python -m etl.main --run-type incremental --as-of 2026-10-26

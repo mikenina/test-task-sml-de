@@ -259,6 +259,12 @@ def _load_core_price(conn, run_id, price_filter_sql, price_filter_params):
 
         cur.execute(
             """
+            DELETE FROM core.price_dates
+            WHERE price_id IN (SELECT price_id FROM enriched_dq)
+            """
+        )
+        cur.execute(
+            """
             INSERT INTO core.price_dates (price_id, price_date)
             SELECT pd.price_id, pd.price_date
             FROM raw.price_dates pd

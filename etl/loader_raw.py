@@ -64,8 +64,7 @@ def load_source_to_raw(conn, run_id, interval_start, interval_end):
         },
     }
 
-
-def load_source_to_raw_changes(conn, run_id, window_start):
+def load_source_to_raw_changes(conn, run_id, window_start, window_end=None):
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -73,6 +72,7 @@ def load_source_to_raw_changes(conn, run_id, window_start):
             DECLARE
                 v_run_id bigint := %s;
                 v_start timestamptz := %s;
+                v_end timestamptz := %s;
             BEGIN
                 INSERT INTO raw.cities
                 SELECT c.*, v_run_id, now() FROM public.cities c;
@@ -86,7 +86,8 @@ def load_source_to_raw_changes(conn, run_id, window_start):
                 INSERT INTO raw.prices
                 SELECT p.*, v_run_id, now()
                 FROM public.prices p
-                WHERE p.updated_at >= v_start;
+                WHERE p.updated_at >= v_start
+                  AND (v_end IS NULL OR p.updated_at < v_end);
 
                 INSERT INTO raw.price_dates
                 SELECT pd.*, v_run_id, now()
@@ -102,8 +103,9 @@ def load_source_to_raw_changes(conn, run_id, window_start):
             END
             $$;
             """,
-            (run_id, window_start),
+            (run_id, window_start, window_end),
         )
+
         cur.execute(
             """
             SELECT
