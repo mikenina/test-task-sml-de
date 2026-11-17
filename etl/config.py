@@ -68,3 +68,4 @@ def validate_run_config(args):
 def get_as_of(args):
     if args.as_of:
         return args.as_of
+    return date.fromisoformat(os.environ.get("AS_OF", "2026-10-26"))

@@ -4,10 +4,10 @@ _Тестовое задание: Middle Data Engineer._
 _Дата выполнения:_ ноябрь 2026г.
 
 _Использование ИИ:_ 
-- Вопрос 3. ML Feature Engineering & Batch Inference тарифов , тк с ML ранее не работала;
+- Вопрос 3. ML Feature Engineering & Batch Inference тарифов (тк с ML ранее не работала);
 - генерация er-диаграмм по ddl;
 - генерация sequence-диаграмм по архитектурному проекту;
-- генерация автотестов по критериям приемки, архитектурному проекту, ddl.
+- генерация автотестов по критериям приёмки и коду.
 
 
 ## 1. Описание репозитория
@@ -163,14 +163,14 @@ docker compose exec app python -m etl.main --run-type incremental --as-of 2026-1
 ### Убедимся, что витрина не содержит месяцев, следующих за as-of
 ```bash
 docker compose exec -T postgres psql -U postgres -d deals_bigdata <<'SQL'
-SELECT count(*) 
-  FROM mart.route_card
-  WHERE month > date_trunc('month', '2026-10-26'::date)::date;
+SELECT 
+  count(*) filter (where month <= date_trunc('month', '2026-10-26'::date)::date) cnt_lte_as_of, 
+  count(*) filter (where month > date_trunc('month', '2026-10-26'::date)::date) cnt_gt_as_of  
+  FROM mart.route_card;
 SQL
-#
-#count 
-#-------
-#     0
+# cnt_lte_as_of | cnt_gt_as_of 
+#---------------+--------------
+#        203644 |            0
 ```
 
 ## 5. [Архитектура решения (./docs/architecture.md)](./docs/architecture.md)

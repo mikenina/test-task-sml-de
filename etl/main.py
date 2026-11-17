@@ -27,11 +27,11 @@ from etl.loader_raw import (
 )
 from etl.stages import (
     STAGE_MART_ROUTE_CARD,
+    STAGE_ML,
     STAGE_RAW_TO_CORE_PRICE,
     STAGE_RAW_TO_CORE_REFERENCE,
     STAGE_SOURCE_TO_RAW,
     STAGE_SOURCE_TO_RAW_CHANGES,
-    STAGE_ML
 )
 
 from ml.main import run_ml_pipeline
@@ -39,10 +39,12 @@ from ml.main import run_ml_pipeline
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("etl")
 
+
 def get_incremental_window(as_of, interval_start=None, interval_end=None):
     if interval_start is not None:
         return interval_start, interval_end
     return as_of - timedelta(days=1), None
+
 
 def run_stage(audit, name, fn):
     stage_id = audit.start_stage(name)
@@ -127,14 +129,13 @@ def run_backfill(audit, data_conn, run_id, args, as_of):
         data_conn.rollback()
         raise
 
-def run_incremental(audit, data_conn, run_id, args, as_of, interval_start, interval_end):
-    window_start, window_end = get_incremental_window(as_of, interval_start, interval_end)
 
+def run_incremental(audit, data_conn, run_id, args, as_of, interval_start, interval_end):
     try:
         run_stage(
             audit, STAGE_SOURCE_TO_RAW_CHANGES,
             lambda: load_source_to_raw_changes(
-                data_conn, run_id, window_start, window_end,
+                data_conn, run_id, interval_start, interval_end,
             ),
         )
         data_conn.commit()
@@ -184,6 +185,7 @@ def run_incremental(audit, data_conn, run_id, args, as_of, interval_start, inter
         data_conn.rollback()
         raise
 
+
 def run():
     args = parse_args()
 
@@ -226,7 +228,8 @@ def run():
         if args.run_type == "backfill":
             run_backfill(audit, data_conn, run_id, args, as_of)
         else:
-            run_incremental(audit, data_conn, run_id, args, as_of)
+            run_incremental(audit, data_conn, run_id, args, as_of,
+                            interval_start, interval_end)
     except Exception as e:
         log.exception("run %s failed", run_id)
         audit.finish_run("failed", error_message=str(e))
